@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "particledb"
+version = "0.2.1"
+description = "Python SDK for ParticleDB: native wire, DB-API 2.0, asyncio, DataFrames, KV, vector search and RAG"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [
+    {name = "Orkes, Inc."},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+]
+keywords = ["particledb", "database", "sql", "vector", "rag", "kv"]
+
+[project.optional-dependencies]
+grpc = ["grpcio>=1.84.1", "protobuf>=6.33.6"]
+# Only for query_arrow() (pyarrow tables) and the opt-in pyarrow decoder:
+# results decode WITHOUT it (built-in Arrow reader).
+arrow = ["pyarrow>=12"]
+# fetch_df() (pyarrow makes it zero-copy). pandas.read_sql / to_sql through SQLAlchemy
+# need the separate sqlalchemy-particledb distribution.
+pandas = ["pandas>=1.5", "pyarrow>=12"]
+# fetch_polars() and bulk_insert(polars.DataFrame): polars reads / writes the Arrow bytes itself.
+polars = ["polars>=0.20"]
+dev = ["pytest", "pyarrow>=12", "pandas>=1.5", "polars>=0.20", "psycopg[binary]>=3.1"]
+
+[project.urls]
+Homepage = "https://particledb.ai"
+Repository = "https://github.com/particledb-ai/particledb-python"
+Issues = "https://github.com/particledb-ai/particledb-python/issues"
+Documentation = "https://particledb.ai/sdks/python/"
+
+[tool.setuptools.packages.find]
+include = ["particledb*"]

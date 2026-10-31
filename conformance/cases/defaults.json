@@ -1,0 +1,133 @@
+{
+  "group": "defaults",
+  "title": "A plain default connect is the native wire in its most efficient mode",
+  "cases": [
+    {
+      "id": "DEF-001",
+      "purpose": "A connect that names only host (and port, when the runner could not bind the default) uses the PDB native wire, protocol 2 multiplexed -- asserted by the SERVER, not by the client's own belief.",
+      "kind": "custom",
+      "modes": [
+        "default",
+        "strict"
+      ],
+      "steps": [
+        "Open a connection with the SDK's documented zero-option entry point (JDBC: DriverManager.getConnection(\"jdbc:particledb://HOST:PORT/\") with no properties).",
+        "Run SHOW pdb.wire_protocol on that connection."
+      ],
+      "expected": "The single value is exactly 'pdb-native-v2'."
+    },
+    {
+      "id": "DEF-002",
+      "purpose": "The default connect negotiates every capability the server offers that changes efficiency or correctness: multiplexing, server-side prepared statements, typed and array parameters, per-entry batch SQLSTATEs, statement notices and per-value numeric scale.",
+      "kind": "custom",
+      "modes": [
+        "default",
+        "strict"
+      ],
+      "steps": [
+        "Default connect as in DEF-001.",
+        "SHOW pdb.wire_capabilities (comma-separated, sorted names of the bits the server ECHOED in HELLO_OK)."
+      ],
+      "expected": "Contains every name in required_capabilities. An SDK that does not implement bulk ingest may omit bulk_ingest, and must say so in its results file as a note on this case.",
+      "required_capabilities": [
+        "v2_mux",
+        "prepared",
+        "typed_params",
+        "array_params",
+        "batch_sqlstate",
+        "statement_notice",
+        "numeric_text"
+      ],
+      "optional_capabilities": [
+        "bulk_ingest",
+        "session_params",
+        "tls"
+      ]
+    },
+    {
+      "id": "DEF-003",
+      "purpose": "Results arrive as binary Arrow IPC, not text.",
+      "kind": "custom",
+      "modes": [
+        "default",
+        "strict"
+      ],
+      "steps": [
+        "Default connect.",
+        "SHOW pdb.wire_result_format."
+      ],
+      "expected": "'arrow_ipc'."
+    },
+    {
+      "id": "DEF-004",
+      "purpose": "What the SDK believes it negotiated equals what the server recorded -- a client-side assertion that cannot be satisfied by a client that silently fell back.",
+      "kind": "custom",
+      "modes": [
+        "default",
+        "strict"
+      ],
+      "steps": [
+        "Default connect.",
+        "Read the SDK's own view of the negotiated protocol and capability set (JDBC: PdbConnection.negotiatedProtocol() / negotiatedCapabilities()).",
+        "Compare with SHOW pdb.wire_protocol / pdb.wire_capabilities."
+      ],
+      "expected": "Identical protocol string and identical capability set."
+    },
+    {
+      "id": "DEF-005",
+      "purpose": "The SDK's default port is the SERVER's default native-wire port (PDB_CONF_DEFAULT_PORT: the runner reads it from the server binary, never from this file), and a connect that omits the port reaches a server listening there.",
+      "kind": "custom",
+      "modes": [
+        "default"
+      ],
+      "steps": [
+        "Assert the SDK's default-port constant equals PDB_CONF_DEFAULT_PORT.",
+        "If the runner's server listens on that port (PDB_CONF_PORT == PDB_CONF_DEFAULT_PORT), connect WITHOUT a port and run SHOW pdb.wire_protocol."
+      ],
+      "expected": "Constant equals PDB_CONF_DEFAULT_PORT; the port-less connect reports 'pdb-native-v2'. When the runner could not bind the default port the second half is skipped with that reason (the first half still runs)."
+    },
+    {
+      "id": "DEF-006",
+      "purpose": "Parameterised statements are executed as server-side prepared statements by default (bound parameters, never interpolated text).",
+      "kind": "custom",
+      "modes": [
+        "default",
+        "strict"
+      ],
+      "steps": [
+        "Default connect.",
+        "Execute SELECT $1::text || '' with the parameter  o'clock; DROP TABLE x --  through the SDK's parameterised API ten times.",
+        "Ask the SDK whether the statement ran server-prepared (JDBC: PdbPreparedStatement.isServerPrepared())."
+      ],
+      "expected": "Every execution returns the parameter byte-for-byte, and the SDK reports the statement as server-prepared after its prepare threshold. (Server side: DEF-002 asserts the prepared capability was negotiated.)"
+    },
+    {
+      "id": "DEF-007",
+      "purpose": "The server observable cannot be forged: SET of pdb.wire_protocol is refused.",
+      "kind": "script",
+      "modes": [
+        "default"
+      ],
+      "steps": [
+        {
+          "op": "error",
+          "sql": "SET pdb.wire_protocol = 'postgres'",
+          "sqlstate": "55P02"
+        },
+        {
+          "op": "query",
+          "sql": "SHOW pdb.wire_protocol",
+          "types": [
+            "text"
+          ],
+          "expect_rows": [
+            [
+              "pdb-native-v2"
+            ]
+          ]
+        }
+      ],
+      "expected": "SET answers 55P02; the value is unchanged."
+    }
+  ]
+}

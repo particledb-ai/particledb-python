@@ -1,0 +1,1803 @@
+{
+ "group": "sql",
+ "title": "SQL semantics through the SDK: types, binding, prepared reuse, batches, streaming, errors, transactions",
+ "cases": [
+  {
+   "id": "SQL-T-001",
+   "purpose": "int2/int4/int8 extremes and NULL round-trip as typed values.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "query",
+     "sql": "SELECT (-32768)::int2, 32767::int2, (-2147483648)::int4, 2147483647::int4, (-9223372036854775808)::int8, 9223372036854775807::int8, NULL::int8",
+     "types": [
+      "int2",
+      "int2",
+      "int4",
+      "int4",
+      "int8",
+      "int8",
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "-32768",
+       "32767",
+       "-2147483648",
+       "2147483647",
+       "-9223372036854775808",
+       "9223372036854775807",
+       null
+      ]
+     ]
+    }
+   ],
+   "expected": "Exact values; NULL is the SDK's null, not 0."
+  },
+  {
+   "id": "SQL-T-002",
+   "purpose": "float4/float8 special values: NaN, Infinity, -Infinity, and an exact binary value.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "query",
+     "sql": "SELECT 'NaN'::float8, 'Infinity'::float8, '-Infinity'::float8, 0.1::float8, 1.5::float4, 'NaN'::float4, NULL::float8",
+     "types": [
+      "float8",
+      "float8",
+      "float8",
+      "float8",
+      "float4",
+      "float4",
+      "float8"
+     ],
+     "expect_rows": [
+      [
+       "NaN",
+       "Infinity",
+       "-Infinity",
+       "0.1",
+       "1.5",
+       "NaN",
+       null
+      ]
+     ]
+    }
+   ],
+   "expected": "Floats compare by IEEE value (NaN equals NaN)."
+  },
+  {
+   "id": "SQL-T-003",
+   "purpose": "numeric keeps PostgreSQL's per-value scale (constrained and unconstrained) and large precision.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "query",
+     "sql": "SELECT x FROM (VALUES (0.52::numeric), (1.123456::numeric), (-12345678901234567890.0001::numeric)) t(x) ORDER BY x",
+     "types": [
+      "numeric"
+     ],
+     "expect_rows": [
+      [
+       "-12345678901234567890.0001"
+      ],
+      [
+       "0.52"
+      ],
+      [
+       "1.123456"
+      ]
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT 1.5::numeric(10,2), NULL::numeric",
+     "types": [
+      "numeric",
+      "numeric"
+     ],
+     "expect_rows": [
+      [
+       "1.50",
+       null
+      ]
+     ]
+    }
+   ],
+   "expected": "numeric compares as an exact decimal STRING including scale: 0.52 is not 0.5200000000000000."
+  },
+  {
+   "id": "SQL-T-004",
+   "purpose": "bool, text (unicode, empty string vs NULL) and varchar.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "query",
+     "sql": "SELECT true, false, NULL::bool, '', NULL::text, 'héllo wörld ✓ 𝄞', 'abc'::varchar(5)",
+     "types": [
+      "bool",
+      "bool",
+      "bool",
+      "text",
+      "text",
+      "text",
+      "text"
+     ],
+     "expect_rows": [
+      [
+       "true",
+       "false",
+       null,
+       "",
+       null,
+       "héllo wörld ✓ 𝄞",
+       "abc"
+      ]
+     ]
+    }
+   ],
+   "expected": "Empty string and NULL are distinct; supplementary-plane characters survive."
+  },
+  {
+   "id": "SQL-T-005",
+   "purpose": "Large text (1 MiB) round-trips through a parameter and a result.",
+   "kind": "script",
+   "modes": [
+    "default"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_t005"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_t005 (id int8 PRIMARY KEY, v text)"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_t005 VALUES ($1, $2)",
+     "params": [
+      {
+       "type": "int8",
+       "value": "1"
+      },
+      {
+       "type": "text",
+       "gen": {
+        "repeat": "0123456789abcdef",
+        "count": 65536
+       }
+      }
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT length(v), v FROM conf_t005 WHERE id = 1",
+     "types": [
+      "int4",
+      "text"
+     ],
+     "expect_rows": [
+      [
+       "1048576",
+       {
+        "gen": {
+         "repeat": "0123456789abcdef",
+         "count": 65536
+        }
+       }
+      ]
+     ]
+    }
+   ],
+   "expected": "Byte-identical value; length 1048576."
+  },
+  {
+   "id": "SQL-T-006",
+   "purpose": "bytea: all 256 byte values and a 1 MiB value, via parameter and result.",
+   "kind": "script",
+   "modes": [
+    "default"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_t006"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_t006 (id int8 PRIMARY KEY, b bytea)"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_t006 VALUES ($1, $2)",
+     "params": [
+      {
+       "type": "int8",
+       "value": "1"
+      },
+      {
+       "type": "bytea",
+       "gen": {
+        "bytes": "all256",
+        "count": 1
+       }
+      }
+     ]
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_t006 VALUES ($1, $2)",
+     "params": [
+      {
+       "type": "int8",
+       "value": "2"
+      },
+      {
+       "type": "bytea",
+       "gen": {
+        "bytes": "all256",
+        "count": 4096
+       }
+      }
+     ]
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_t006 VALUES ($1, $2)",
+     "params": [
+      {
+       "type": "int8",
+       "value": "3"
+      },
+      {
+       "type": "bytea",
+       "value": null
+      }
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT b FROM conf_t006 ORDER BY id",
+     "types": [
+      "bytea"
+     ],
+     "expect_rows": [
+      [
+       {
+        "gen": {
+         "bytes": "all256",
+         "count": 1
+        }
+       }
+      ],
+      [
+       {
+        "gen": {
+         "bytes": "all256",
+         "count": 4096
+        }
+       }
+      ],
+      [
+       null
+      ]
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT '\\xdeadbeef'::bytea",
+     "types": [
+      "bytea"
+     ],
+     "expect_rows": [
+      [
+       "\\xdeadbeef"
+      ]
+     ]
+    }
+   ],
+   "expected": "Bytes compare exactly (canonical form \\x + lowercase hex)."
+  },
+  {
+   "id": "SQL-T-007",
+   "purpose": "json keeps its input text; jsonb is normalised as PostgreSQL normalises it.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "query",
+     "sql": "SELECT '{\"b\":1,  \"a\":[1,2]}'::json, '{\"b\":1,  \"a\":[1,2]}'::jsonb, NULL::jsonb",
+     "types": [
+      "json",
+      "jsonb",
+      "jsonb"
+     ],
+     "expect_rows": [
+      [
+       "{\"b\":1,  \"a\":[1,2]}",
+       "{\"a\": [1, 2], \"b\": 1}",
+       null
+      ]
+     ]
+    },
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_t007"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_t007 (id int8 PRIMARY KEY, j jsonb)"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_t007 VALUES ($1, $2)",
+     "params": [
+      {
+       "type": "int8",
+       "value": "1"
+      },
+      {
+       "type": "jsonb",
+       "value": "{\"k\": \"v\", \"n\": null}"
+      }
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT j->>'k', j FROM conf_t007",
+     "types": [
+      "text",
+      "jsonb"
+     ],
+     "expect_rows": [
+      [
+       "v",
+       "{\"k\": \"v\", \"n\": null}"
+      ]
+     ]
+    }
+   ],
+   "expected": "Exact text match."
+  },
+  {
+   "id": "SQL-T-008",
+   "purpose": "date and timestamp (microseconds) round-trip independent of the client's zone.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "query",
+     "sql": "SELECT '2024-02-29'::date, '1999-12-31 23:59:59.999999'::timestamp, '0001-01-01 00:00:00'::timestamp, NULL::timestamp",
+     "types": [
+      "date",
+      "timestamp",
+      "timestamp",
+      "timestamp"
+     ],
+     "expect_rows": [
+      [
+       "2024-02-29",
+       "1999-12-31 23:59:59.999999",
+       "0001-01-01 00:00:00",
+       null
+      ]
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT $1::timestamp, $2::date",
+     "params": [
+      {
+       "type": "timestamp",
+       "value": "2020-06-15 12:34:56.789012"
+      },
+      {
+       "type": "date",
+       "value": "1970-01-01"
+      }
+     ],
+     "types": [
+      "timestamp",
+      "date"
+     ],
+     "expect_rows": [
+      [
+       "2020-06-15 12:34:56.789012",
+       "1970-01-01"
+      ]
+     ]
+    }
+   ],
+   "expected": "Wall-clock values unchanged (no zone shift)."
+  },
+  {
+   "id": "SQL-T-009",
+   "purpose": "timestamptz is an instant: the same instant comes back whatever the session zone.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "SET TimeZone = 'America/Los_Angeles'"
+    },
+    {
+     "op": "query",
+     "sql": "SELECT '2024-03-10 10:00:00+00'::timestamptz",
+     "types": [
+      "timestamptz"
+     ],
+     "expect_rows": [
+      [
+       "2024-03-10 10:00:00+00"
+      ]
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT $1::timestamptz",
+     "params": [
+      {
+       "type": "timestamptz",
+       "value": "2024-07-01 00:00:00.5+00"
+      }
+     ],
+     "types": [
+      "timestamptz"
+     ],
+     "expect_rows": [
+      [
+       "2024-07-01 00:00:00.5+00"
+      ]
+     ]
+    },
+    {
+     "op": "exec",
+     "sql": "RESET TimeZone"
+    }
+   ],
+   "expected": "Canonical form is the UTC instant 'YYYY-MM-DD HH:MM:SS[.f]+00'."
+  },
+  {
+   "id": "SQL-T-010",
+   "purpose": "uuid round-trips as a value.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "query",
+     "sql": "SELECT 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid, $1::uuid",
+     "params": [
+      {
+       "type": "uuid",
+       "value": "123e4567-e89b-12d3-a456-426614174000"
+      }
+     ],
+     "types": [
+      "uuid",
+      "uuid"
+     ],
+     "expect_rows": [
+      [
+       "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11",
+       "123e4567-e89b-12d3-a456-426614174000"
+      ]
+     ]
+    }
+   ],
+   "expected": "Lower-case hyphenated canonical form."
+  },
+  {
+   "id": "SQL-T-011",
+   "purpose": "Arrays: int and text arrays with NULL elements, as results and as bound parameters.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "query",
+     "sql": "SELECT ARRAY[1, NULL, 3]::int4[], ARRAY['a', NULL, 'c,d']::text[], NULL::int8[], '{}'::int4[]",
+     "types": [
+      "int4[]",
+      "text[]",
+      "int8[]",
+      "int4[]"
+     ],
+     "expect_rows": [
+      [
+       [
+        "1",
+        null,
+        "3"
+       ],
+       [
+        "a",
+        null,
+        "c,d"
+       ],
+       null,
+       []
+      ]
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT $1::int8[]",
+     "params": [
+      {
+       "type": "int8[]",
+       "value": [
+        "7",
+        null,
+        "-9"
+       ]
+      }
+     ],
+     "types": [
+      "int8[]"
+     ],
+     "expect_rows": [
+      [
+       [
+        "7",
+        null,
+        "-9"
+       ]
+      ]
+     ]
+    }
+   ],
+   "expected": "Element order, NULL elements and the empty array are preserved."
+  },
+  {
+   "id": "SQL-T-012",
+   "purpose": "vector values round-trip and distance operators answer.",
+   "kind": "script",
+   "modes": [
+    "default"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_t012"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_t012 (id int8 PRIMARY KEY, v vector(3))"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_t012 VALUES (1, '[1,2,3]'), (2, '[0.5,-1,0]')"
+    },
+    {
+     "op": "query",
+     "sql": "SELECT v FROM conf_t012 ORDER BY id",
+     "types": [
+      "vector"
+     ],
+     "expect_rows": [
+      [
+       [
+        "1",
+        "2",
+        "3"
+       ]
+      ],
+      [
+       [
+        "0.5",
+        "-1",
+        "0"
+       ]
+      ]
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT id FROM conf_t012 ORDER BY v <-> '[1,2,3]' LIMIT 1",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "1"
+      ]
+     ]
+    }
+   ],
+   "expected": "Vector components compare as float32."
+  },
+  {
+   "id": "SQL-T-013",
+   "purpose": "time (without time zone) is a supported type since fix/server-bugs-from-jdbc (rc14/integ6): a time literal keeps its microseconds through the SDK. Read back as text so every SDK checks the server's value without its own time decoding (flipped from the old 0A000 refusal case).",
+   "kind": "script",
+   "modes": [
+    "default"
+   ],
+   "steps": [
+    {
+     "op": "query",
+     "sql": "SELECT CAST('23:59:59.123456'::time AS text)",
+     "types": [
+      "text"
+     ],
+     "expect_rows": [
+      [
+       "23:59:59.123456"
+      ]
+     ]
+    }
+   ],
+   "expected": "23:59:59.123456 as text."
+  },
+  {
+   "id": "SQL-P-001",
+   "purpose": "Every scalar type binds as a typed parameter and reads back unchanged through a table.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_p001"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_p001 (id int8 PRIMARY KEY, a int2, b int4, c float4, d float8, e numeric, f bool, g text, h bytea, i date, j timestamp, k timestamptz, l uuid)"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_p001 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+     "params": [
+      {
+       "type": "int8",
+       "value": "1"
+      },
+      {
+       "type": "int2",
+       "value": "-7"
+      },
+      {
+       "type": "int4",
+       "value": "123456"
+      },
+      {
+       "type": "float4",
+       "value": "2.5"
+      },
+      {
+       "type": "float8",
+       "value": "-Infinity"
+      },
+      {
+       "type": "numeric",
+       "value": "3.14159265358979323846"
+      },
+      {
+       "type": "bool",
+       "value": "true"
+      },
+      {
+       "type": "text",
+       "value": "it's \"quoted\" \\ back"
+      },
+      {
+       "type": "bytea",
+       "value": "\\x00ff10"
+      },
+      {
+       "type": "date",
+       "value": "2001-09-09"
+      },
+      {
+       "type": "timestamp",
+       "value": "2001-09-09 01:46:40"
+      },
+      {
+       "type": "timestamptz",
+       "value": "2001-09-09 01:46:40+00"
+      },
+      {
+       "type": "uuid",
+       "value": "00000000-0000-0000-0000-000000000001"
+      }
+     ]
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_p001 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+     "params": [
+      {
+       "type": "int8",
+       "value": "2"
+      },
+      {
+       "type": "int2",
+       "value": null
+      },
+      {
+       "type": "int4",
+       "value": null
+      },
+      {
+       "type": "float4",
+       "value": null
+      },
+      {
+       "type": "float8",
+       "value": null
+      },
+      {
+       "type": "numeric",
+       "value": null
+      },
+      {
+       "type": "bool",
+       "value": null
+      },
+      {
+       "type": "text",
+       "value": null
+      },
+      {
+       "type": "bytea",
+       "value": null
+      },
+      {
+       "type": "date",
+       "value": null
+      },
+      {
+       "type": "timestamp",
+       "value": null
+      },
+      {
+       "type": "timestamptz",
+       "value": null
+      },
+      {
+       "type": "uuid",
+       "value": null
+      }
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT a, b, c, d, e, f, g, h, i, j, k, l FROM conf_p001 ORDER BY id",
+     "types": [
+      "int2",
+      "int4",
+      "float4",
+      "float8",
+      "numeric",
+      "bool",
+      "text",
+      "bytea",
+      "date",
+      "timestamp",
+      "timestamptz",
+      "uuid"
+     ],
+     "expect_rows": [
+      [
+       "-7",
+       "123456",
+       "2.5",
+       "-Infinity",
+       "3.14159265358979323846",
+       "true",
+       "it's \"quoted\" \\ back",
+       "\\x00ff10",
+       "2001-09-09",
+       "2001-09-09 01:46:40",
+       "2001-09-09 01:46:40+00",
+       "00000000-0000-0000-0000-000000000001"
+      ],
+      [
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       null
+      ]
+     ]
+    }
+   ],
+   "expected": "Values and typed NULLs unchanged."
+  },
+  {
+   "id": "SQL-P-002",
+   "purpose": "A bound text parameter is data, never SQL (no injection, no quote mangling).",
+   "kind": "script",
+   "modes": [
+    "default"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_p002"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_p002 (id int8 PRIMARY KEY, v text)"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_p002 VALUES (1, $1)",
+     "params": [
+      {
+       "type": "text",
+       "value": "x'); DROP TABLE conf_p002; --"
+      }
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT v FROM conf_p002 WHERE v = $1",
+     "params": [
+      {
+       "type": "text",
+       "value": "x'); DROP TABLE conf_p002; --"
+      }
+     ],
+     "types": [
+      "text"
+     ],
+     "expect_rows": [
+      [
+       "x'); DROP TABLE conf_p002; --"
+      ]
+     ]
+    },
+    {
+     "op": "query",
+     "sql": "SELECT count(*) FROM conf_p002 WHERE v = $1",
+     "params": [
+      {
+       "type": "text",
+       "value": "' OR '1'='1"
+      }
+     ],
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "0"
+      ]
+     ]
+    }
+   ],
+   "expected": "The table still exists; the hostile string is stored verbatim; the tautology matches nothing."
+  },
+  {
+   "id": "SQL-PREP-001",
+   "purpose": "A prepared statement reused many times with different parameters returns the right row every time (past the driver's server-prepare threshold).",
+   "kind": "custom",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    "CREATE TABLE conf_prep1 (id int8 PRIMARY KEY, v text); insert ids 1..50 with v = 'v' || id.",
+    "Prepare SELECT v FROM conf_prep1 WHERE id = $1 ONCE; execute it 50 times with ids 1..50 in order, then 50 more in reverse."
+   ],
+   "expected": "Each execution returns exactly ['v<id>']."
+  },
+  {
+   "id": "SQL-PREP-002",
+   "purpose": "A statement prepared before a DDL change still answers correctly after it (plan/describe invalidation).",
+   "kind": "custom",
+   "modes": [
+    "default"
+   ],
+   "steps": [
+    "CREATE TABLE conf_prep2 (id int8 PRIMARY KEY, a text); INSERT (1,'x').",
+    "Prepare SELECT * FROM conf_prep2 WHERE id = $1; execute 6 times.",
+    "ALTER TABLE conf_prep2 ADD COLUMN b int8; UPDATE conf_prep2 SET b = 5.",
+    "Execute the SAME prepared statement again."
+   ],
+   "expected": "After the ALTER the result has 3 columns (id, a, b) with b = 5, or the SDK raises a clear error with SQLSTATE 0A000/26000 -- never the stale 2-column shape or a decode failure."
+  },
+  {
+   "id": "SQL-BATCH-001",
+   "purpose": "A parameterised batch of 1000 inserts reports a count per row and every row lands.",
+   "kind": "custom",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    "CREATE TABLE conf_b1 (id int8 PRIMARY KEY, v text).",
+    "Batch INSERT INTO conf_b1 VALUES ($1, $2) for ids 1..1000 in one SDK batch call.",
+    "SELECT count(*), sum(id)."
+   ],
+   "expected": "1000 per-row counts each 1; count 1000; sum 500500."
+  },
+  {
+   "id": "SQL-BATCH-002",
+   "purpose": "A batch whose 3rd row violates a unique key fails with SQLSTATE 23505 for that entry, and in a transaction nothing is committed.",
+   "kind": "custom",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    "CREATE TABLE conf_b2 (id int8 PRIMARY KEY).",
+    "Autocommit OFF. Batch INSERT ids [1, 2, 1, 3]. Expect a batch error.",
+    "ROLLBACK. SELECT count(*)."
+   ],
+   "expected": "The batch error's SQLSTATE is 23505 (not a generic HY000); after rollback count is 0."
+  },
+  {
+   "id": "SQL-STREAM-001",
+   "purpose": "A large result set streams with bounded client memory.",
+   "kind": "custom",
+   "modes": [
+    "default"
+   ],
+   "steps": [
+    "Run SELECT g, repeat('x', 100) FROM generate_series(1, 3000000) g through the SDK's streaming/iterating API (JDBC: setFetchSize(10000), the standard JDBC knob; pgjdbc streams only when it is set), with the client process's heap capped (JVM: -Xmx256m; the adapter runs in that bound).",
+    "Iterate every row, summing g and counting rows; do not retain rows."
+   ],
+   "expected": "3000000 rows, sum 4500001500000, no out-of-memory; the first row is available before the last row is produced (adapter records time-to-first-row < total time)."
+  },
+  {
+   "id": "SQL-MULTI-001",
+   "purpose": "A multi-statement string runs as ONE implicit transaction: a failure in a later statement rolls back the earlier ones (PostgreSQL simple-query semantics).",
+   "kind": "custom",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    "CREATE TABLE conf_m1 (id int8 PRIMARY KEY).",
+    "Execute the single string 'INSERT INTO conf_m1 VALUES (1); INSERT INTO conf_m1 VALUES (1)' through the SDK's plain (non-prepared) execute.",
+    "SELECT count(*) FROM conf_m1."
+   ],
+   "expected": "The execute raises 23505; count is 0."
+  },
+  {
+   "id": "SQL-MULTI-002",
+   "purpose": "A multi-statement string's successful statements are all applied and its last result is returned.",
+   "kind": "custom",
+   "modes": [
+    "default"
+   ],
+   "steps": [
+    "CREATE TABLE conf_m2 (id int8 PRIMARY KEY).",
+    "Execute 'INSERT INTO conf_m2 VALUES (1); INSERT INTO conf_m2 VALUES (2); SELECT count(*) FROM conf_m2'."
+   ],
+   "expected": "No error; the SDK exposes the final SELECT's result as 2 (JDBC: walk getMoreResults until the result set)."
+  },
+  {
+   "id": "SQL-ERR-001",
+   "purpose": "unique violation maps to 23505.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_e1"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_e1 (id int8 PRIMARY KEY)"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_e1 VALUES (1)"
+    },
+    {
+     "op": "error",
+     "sql": "INSERT INTO conf_e1 VALUES (1)",
+     "sqlstate": "23505"
+    }
+   ],
+   "expected": "SQLSTATE 23505."
+  },
+  {
+   "id": "SQL-ERR-002",
+   "purpose": "undefined table maps to 42P01.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "error",
+     "sql": "SELECT * FROM conf_no_such_table",
+     "sqlstate": "42P01"
+    }
+   ],
+   "expected": "SQLSTATE 42P01."
+  },
+  {
+   "id": "SQL-ERR-003",
+   "purpose": "syntax error maps to 42601.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "error",
+     "sql": "SELEC 1",
+     "sqlstate": "42601"
+    }
+   ],
+   "expected": "SQLSTATE 42601."
+  },
+  {
+   "id": "SQL-ERR-004",
+   "purpose": "undefined column maps to 42703.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "error",
+     "sql": "SELECT no_such_column FROM (SELECT 1 AS a) t",
+     "sqlstate": "42703"
+    }
+   ],
+   "expected": "SQLSTATE 42703."
+  },
+  {
+   "id": "SQL-ERR-005",
+   "purpose": "division by zero maps to 22012.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "error",
+     "sql": "SELECT 1 / 0",
+     "sqlstate": "22012"
+    }
+   ],
+   "expected": "SQLSTATE 22012."
+  },
+  {
+   "id": "SQL-ERR-006",
+   "purpose": "NOT NULL violation maps to 23502; FK violation to 23503.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_e6c"
+    },
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_e6p"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_e6p (id int8 PRIMARY KEY)"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_e6c (id int8 PRIMARY KEY, p int8 NOT NULL REFERENCES conf_e6p(id))"
+    },
+    {
+     "op": "error",
+     "sql": "INSERT INTO conf_e6c VALUES (1, NULL)",
+     "sqlstate": "23502"
+    },
+    {
+     "op": "error",
+     "sql": "INSERT INTO conf_e6c VALUES (1, 99)",
+     "sqlstate": "23503"
+    }
+   ],
+   "expected": "23502 then 23503."
+  },
+  {
+   "id": "SQL-ERR-007",
+   "purpose": "invalid text representation maps to 22P02; undefined function to 42883.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "error",
+     "sql": "SELECT 'abc'::int4",
+     "sqlstate": "22P02"
+    },
+    {
+     "op": "error",
+     "sql": "SELECT conf_no_such_fn(1)",
+     "sqlstate": "42883"
+    }
+   ],
+   "expected": "22P02 then 42883."
+  },
+  {
+   "id": "SQL-ERR-008",
+   "purpose": "After an error inside a transaction every statement answers 25P02 until ROLLBACK, and ROLLBACK recovers the connection.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "begin"
+    },
+    {
+     "op": "error",
+     "sql": "SELECT 1 / 0",
+     "sqlstate": "22012"
+    },
+    {
+     "op": "error",
+     "sql": "SELECT 1",
+     "sqlstate": "25P02"
+    },
+    {
+     "op": "rollback"
+    },
+    {
+     "op": "query",
+     "sql": "SELECT 1",
+     "types": [
+      "int4"
+     ],
+     "expect_rows": [
+      [
+       "1"
+      ]
+     ]
+    }
+   ],
+   "expected": "22012, 25P02, then normal service."
+  },
+  {
+   "id": "SQL-ERR-009",
+   "purpose": "A serialization failure under SERIALIZABLE surfaces as 40001 (write skew).",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_e9"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_e9 (id int8 PRIMARY KEY, on_call bool)"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_e9 VALUES (1, true), (2, true)"
+    },
+    {
+     "op": "isolation",
+     "conn": "a",
+     "level": "serializable"
+    },
+    {
+     "op": "isolation",
+     "conn": "b",
+     "level": "serializable"
+    },
+    {
+     "op": "begin",
+     "conn": "a"
+    },
+    {
+     "op": "begin",
+     "conn": "b"
+    },
+    {
+     "op": "query",
+     "conn": "a",
+     "sql": "SELECT count(*) FROM conf_e9 WHERE on_call",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "2"
+      ]
+     ]
+    },
+    {
+     "op": "query",
+     "conn": "b",
+     "sql": "SELECT count(*) FROM conf_e9 WHERE on_call",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "2"
+      ]
+     ]
+    },
+    {
+     "op": "exec",
+     "conn": "a",
+     "sql": "UPDATE conf_e9 SET on_call = false WHERE id = 1"
+    },
+    {
+     "op": "exec",
+     "conn": "b",
+     "sql": "UPDATE conf_e9 SET on_call = false WHERE id = 2"
+    },
+    {
+     "op": "commit",
+     "conn": "a"
+    },
+    {
+     "op": "commit_error",
+     "conn": "b",
+     "sqlstate": "40001"
+    },
+    {
+     "op": "query",
+     "sql": "SELECT count(*) FROM conf_e9 WHERE on_call",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "1"
+      ]
+     ]
+    }
+   ],
+   "expected": "The second committer (or an earlier statement of it) fails 40001; exactly one doctor goes off call. commit_error accepts the 40001 at any statement of conn b from its UPDATE on."
+  },
+  {
+   "id": "SQL-TXN-001",
+   "purpose": "COMMIT makes writes visible to another connection; ROLLBACK discards them.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_x1"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_x1 (id int8 PRIMARY KEY)"
+    },
+    {
+     "op": "begin"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_x1 VALUES (1)"
+    },
+    {
+     "op": "query",
+     "conn": "b",
+     "sql": "SELECT count(*) FROM conf_x1",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "0"
+      ]
+     ]
+    },
+    {
+     "op": "commit"
+    },
+    {
+     "op": "query",
+     "conn": "b",
+     "sql": "SELECT count(*) FROM conf_x1",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "1"
+      ]
+     ]
+    },
+    {
+     "op": "begin"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_x1 VALUES (2)"
+    },
+    {
+     "op": "rollback"
+    },
+    {
+     "op": "query",
+     "conn": "b",
+     "sql": "SELECT count(*) FROM conf_x1",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "1"
+      ]
+     ]
+    }
+   ],
+   "expected": "0, 1, 1."
+  },
+  {
+   "id": "SQL-TXN-002",
+   "purpose": "Savepoints: ROLLBACK TO undoes only the work after the savepoint, and the transaction stays usable after an error rolled back to a savepoint.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_x2"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_x2 (id int8 PRIMARY KEY)"
+    },
+    {
+     "op": "begin"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_x2 VALUES (1)"
+    },
+    {
+     "op": "savepoint",
+     "name": "s1"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_x2 VALUES (2)"
+    },
+    {
+     "op": "error",
+     "sql": "INSERT INTO conf_x2 VALUES (1)",
+     "sqlstate": "23505"
+    },
+    {
+     "op": "rollback_to",
+     "name": "s1"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_x2 VALUES (3)"
+    },
+    {
+     "op": "commit"
+    },
+    {
+     "op": "query",
+     "sql": "SELECT id FROM conf_x2 ORDER BY id",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "1"
+      ],
+      [
+       "3"
+      ]
+     ]
+    }
+   ],
+   "expected": "Rows 1 and 3."
+  },
+  {
+   "id": "SQL-TXN-003",
+   "purpose": "READ COMMITTED (the default) sees a concurrent commit on its next statement; REPEATABLE READ does not.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_x3"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_x3 (id int8 PRIMARY KEY, v int8)"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_x3 VALUES (1, 10)"
+    },
+    {
+     "op": "query",
+     "sql": "SHOW transaction_isolation",
+     "types": [
+      "text"
+     ],
+     "expect_rows": [
+      [
+       "read committed"
+      ]
+     ]
+    },
+    {
+     "op": "begin",
+     "conn": "a"
+    },
+    {
+     "op": "query",
+     "conn": "a",
+     "sql": "SELECT v FROM conf_x3 WHERE id = 1",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "10"
+      ]
+     ]
+    },
+    {
+     "op": "exec",
+     "conn": "b",
+     "sql": "UPDATE conf_x3 SET v = 20 WHERE id = 1"
+    },
+    {
+     "op": "query",
+     "conn": "a",
+     "sql": "SELECT v FROM conf_x3 WHERE id = 1",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "20"
+      ]
+     ]
+    },
+    {
+     "op": "commit",
+     "conn": "a"
+    },
+    {
+     "op": "isolation",
+     "conn": "a",
+     "level": "repeatable read"
+    },
+    {
+     "op": "begin",
+     "conn": "a"
+    },
+    {
+     "op": "query",
+     "conn": "a",
+     "sql": "SELECT v FROM conf_x3 WHERE id = 1",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "20"
+      ]
+     ]
+    },
+    {
+     "op": "exec",
+     "conn": "b",
+     "sql": "UPDATE conf_x3 SET v = 30 WHERE id = 1"
+    },
+    {
+     "op": "query",
+     "conn": "a",
+     "sql": "SELECT v FROM conf_x3 WHERE id = 1",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "20"
+      ]
+     ]
+    },
+    {
+     "op": "commit",
+     "conn": "a"
+    },
+    {
+     "op": "query",
+     "conn": "a",
+     "sql": "SELECT v FROM conf_x3 WHERE id = 1",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "30"
+      ]
+     ]
+    }
+   ],
+   "expected": "RC: 10 then 20. RR: 20 then 20, and 30 after commit."
+  },
+  {
+   "id": "SQL-TXN-004",
+   "purpose": "The SDK's isolation setter reaches the server (SHOW agrees) for RC, RR and SERIALIZABLE.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "isolation",
+     "level": "serializable"
+    },
+    {
+     "op": "begin"
+    },
+    {
+     "op": "query",
+     "sql": "SHOW transaction_isolation",
+     "types": [
+      "text"
+     ],
+     "expect_rows": [
+      [
+       "serializable"
+      ]
+     ]
+    },
+    {
+     "op": "commit"
+    },
+    {
+     "op": "isolation",
+     "level": "repeatable read"
+    },
+    {
+     "op": "begin"
+    },
+    {
+     "op": "query",
+     "sql": "SHOW transaction_isolation",
+     "types": [
+      "text"
+     ],
+     "expect_rows": [
+      [
+       "repeatable read"
+      ]
+     ]
+    },
+    {
+     "op": "commit"
+    },
+    {
+     "op": "isolation",
+     "level": "read committed"
+    },
+    {
+     "op": "begin"
+    },
+    {
+     "op": "query",
+     "sql": "SHOW transaction_isolation",
+     "types": [
+      "text"
+     ],
+     "expect_rows": [
+      [
+       "read committed"
+      ]
+     ]
+    },
+    {
+     "op": "commit"
+    }
+   ],
+   "expected": "Each level as set."
+  },
+  {
+   "id": "SQL-TXN-005",
+   "purpose": "Read-your-writes: on the same connection immediately, and on a DIFFERENT pooled connection right after the commit returned.",
+   "kind": "custom",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    "CREATE TABLE conf_x5 (id int8 PRIMARY KEY, v int8).",
+    "200 iterations: on connection A (autocommit) UPDATE/INSERT v=i for id=i; immediately SELECT on A; then borrow a connection from the SDK's pool (or a fresh one) and SELECT."
+   ],
+   "expected": "Every read returns the value just written (no stale read across connections after an acked commit)."
+  },
+  {
+   "id": "SQL-CANCEL-001",
+   "purpose": "Cancelling a running statement answers 57014 and leaves the connection usable.",
+   "kind": "custom",
+   "modes": [
+    "default"
+   ],
+   "steps": [
+    "Start SELECT pg_sleep(30) on connection A in a thread (an interruptible wait: the server's row-count limit refuses generate_series big enough to run for seconds).",
+    "After 300 ms call the SDK's cancel (JDBC Statement.cancel()) from another thread.",
+    "Then SELECT 1 on A."
+   ],
+   "expected": "The sleeping statement fails with 57014 within 5 s of the cancel (not after 30 s); SELECT 1 returns 1 on the same connection."
+  },
+  {
+   "id": "SQL-TIMEOUT-001",
+   "purpose": "A statement timeout (SDK setter and SET statement_timeout) answers 57014 and the connection stays usable.",
+   "kind": "custom",
+   "modes": [
+    "default"
+   ],
+   "steps": [
+    "Set the SDK's per-statement timeout to 1 s (JDBC setQueryTimeout(1)); run SELECT pg_sleep(30).",
+    "SET statement_timeout = '500ms'; run SELECT pg_sleep(30) again; RESET statement_timeout; SELECT 1."
+   ],
+   "expected": "57014 both times, each within 6 s; the connection stays usable (a timeout the server enforced is not an ambiguous outcome, so the connection is not discarded); then 1."
+  },
+  {
+   "id": "SQL-DDL-001",
+   "purpose": "DDL committed on one connection is immediately usable for DML on another.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_d1"
+    },
+    {
+     "op": "exec",
+     "conn": "a",
+     "sql": "CREATE TABLE conf_d1 (id int8 PRIMARY KEY, v text)"
+    },
+    {
+     "op": "exec",
+     "conn": "b",
+     "sql": "INSERT INTO conf_d1 VALUES (1, 'x')"
+    },
+    {
+     "op": "query",
+     "conn": "a",
+     "sql": "SELECT v FROM conf_d1",
+     "types": [
+      "text"
+     ],
+     "expect_rows": [
+      [
+       "x"
+      ]
+     ]
+    },
+    {
+     "op": "exec",
+     "conn": "a",
+     "sql": "ALTER TABLE conf_d1 ADD COLUMN w int8"
+    },
+    {
+     "op": "exec",
+     "conn": "b",
+     "sql": "UPDATE conf_d1 SET w = 7"
+    },
+    {
+     "op": "query",
+     "conn": "a",
+     "sql": "SELECT w FROM conf_d1",
+     "types": [
+      "int8"
+     ],
+     "expect_rows": [
+      [
+       "7"
+      ]
+     ]
+    }
+   ],
+   "expected": "x then 7."
+  },
+  {
+   "id": "SQL-DDL-002",
+   "purpose": "Transactional DDL: CREATE TABLE inside a rolled-back transaction leaves no table.",
+   "kind": "script",
+   "modes": [
+    "default",
+    "strict"
+   ],
+   "steps": [
+    {
+     "op": "exec",
+     "sql": "DROP TABLE IF EXISTS conf_d2"
+    },
+    {
+     "op": "begin"
+    },
+    {
+     "op": "exec",
+     "sql": "CREATE TABLE conf_d2 (id int8 PRIMARY KEY)"
+    },
+    {
+     "op": "exec",
+     "sql": "INSERT INTO conf_d2 VALUES (1)"
+    },
+    {
+     "op": "rollback"
+    },
+    {
+     "op": "error",
+     "sql": "SELECT * FROM conf_d2",
+     "sqlstate": "42P01"
+    }
+   ],
+   "expected": "42P01 after rollback."
+  }
+ ]
+}

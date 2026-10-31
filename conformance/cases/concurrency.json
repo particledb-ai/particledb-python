@@ -1,0 +1,62 @@
+{
+  "group": "concurrency",
+  "title": "Many concurrent streams over ONE multiplexed connection",
+  "cases": [
+    {
+      "id": "CONC-001",
+      "purpose": "N=32 threads share one connection; every result belongs to the statement that asked for it (no cross-stream delivery).",
+      "kind": "custom",
+      "modes": ["default", "strict"],
+      "steps": [
+        "One SDK connection (multiplexed). CREATE TABLE conf_c1 (id int8 PRIMARY KEY, v text); insert ids 1..1000 with v = 'row-' || id.",
+        "32 threads x 200 iterations: each picks a random id and runs SELECT id, v FROM conf_c1 WHERE id = $1 (half prepared, half literal SQL) on the SAME connection.",
+        "Check SHOW pdb.wire_protocol on that connection afterwards."
+      ],
+      "expected": "6400 results, each exactly [id, 'row-'||id] for the id it asked; zero errors; protocol 'pdb-native-v2'."
+    },
+    {
+      "id": "CONC-002",
+      "purpose": "No head-of-line blocking: a slow statement does not delay fast ones on the same connection.",
+      "kind": "custom",
+      "modes": ["default"],
+      "steps": [
+        "One connection. Thread 1 runs SELECT pg_sleep(2).",
+        "100 ms later threads 2..9 each run SELECT 1 twenty times on the SAME connection."
+      ],
+      "expected": "All 160 fast statements finish before the slow one returns (each fast statement < 1 s)."
+    },
+    {
+      "id": "CONC-003",
+      "purpose": "Two large result sets streamed concurrently on one connection both arrive complete and in order.",
+      "kind": "custom",
+      "modes": ["default"],
+      "steps": [
+        "One connection, two threads: SELECT g FROM generate_series(1, 200000) g and SELECT -g FROM generate_series(1, 200000) g, each iterated fully."
+      ],
+      "expected": "Each thread sees exactly its 200000 values in order (sum 20000100000 and -20000100000)."
+    },
+    {
+      "id": "CONC-004",
+      "purpose": "Interleaved transactions on two connections are isolated; concurrent statements inside ONE connection's open transaction all see that transaction's writes.",
+      "kind": "custom",
+      "modes": ["default", "strict"],
+      "steps": [
+        "Connections A and B. CREATE TABLE conf_c4 (id int8 PRIMARY KEY, owner text).",
+        "A: BEGIN; INSERT (1,'a'). B: BEGIN; INSERT (2,'b').",
+        "On A, 8 threads concurrently SELECT owner FROM conf_c4 ORDER BY id (shared session, in A's transaction). On B likewise.",
+        "Commit both; read from a third connection."
+      ],
+      "expected": "A's threads all see only ['a']; B's only ['b']; afterwards ['a','b']."
+    },
+    {
+      "id": "CONC-005",
+      "purpose": "More concurrent statements than the server's advertised stream cap queue at the client instead of failing.",
+      "kind": "custom",
+      "modes": ["default"],
+      "steps": [
+        "One connection; disable any optional client-side rejection cap so this case isolates the server-advertised cap. Start (server stream cap x 3) threads, each running SELECT pg_sleep(0.05), 1 once."
+      ],
+      "expected": "Every statement returns 1; none fails with a stream-limit error."
+    }
+  ]
+}

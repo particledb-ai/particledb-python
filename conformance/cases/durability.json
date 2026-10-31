@@ -1,0 +1,25 @@
+{
+  "group": "durability",
+  "title": "An acknowledged write survives kill -9",
+  "notes": [
+    "The adapter drives the server through PDB_CONF_CONTROL (an executable): `$PDB_CONF_CONTROL kill9` sends SIGKILL to the server and waits for it to exit; `$PDB_CONF_CONTROL restart` starts it again on the same ports and data directory and returns once the native port answers. Both exit non-zero on failure.",
+    "Modes: groupsync is the shipped default and MUST hold these cases (an acked commit has been fsynced by the group); sync must too. nosync is never in a durability lane."
+  ],
+  "cases": [
+    {"id": "DUR-001", "purpose": "Acked autocommit INSERTs survive kill -9.", "kind": "custom", "modes": ["default", "strict"],
+     "steps": ["CREATE TABLE conf_dur1 (id int8 PRIMARY KEY, v text).", "Insert ids 1..500 one autocommit statement at a time, recording each id whose execute RETURNED successfully.", "kill9; restart; reconnect.", "SELECT id FROM conf_dur1."],
+     "expected": "Every acked id is present (a superset is allowed only for an id whose execute was in flight at the kill; this case kills after all returned, so exactly 1..500)."},
+    {"id": "DUR-002", "purpose": "An acked multi-statement COMMIT survives kill -9 atomically.", "kind": "custom", "modes": ["default", "strict"],
+     "steps": ["Autocommit OFF; INSERT 100 rows into conf_dur2; UPDATE one of them; COMMIT (acked).", "kill9; restart; reconnect.", "SELECT count(*), sum(v) FROM conf_dur2."],
+     "expected": "All 100 rows with the update applied."},
+    {"id": "DUR-003", "purpose": "An acked executeBatch survives kill -9.", "kind": "custom", "modes": ["default", "strict"],
+     "steps": ["Batch-insert 1000 rows into conf_dur3 (one SDK batch call, acked).", "kill9; restart; reconnect; count."],
+     "expected": "1000."},
+    {"id": "DUR-004", "purpose": "An acked KV SET (native frame where the SDK has one) survives kill -9, visible over the SDK and RESP after restart.", "kind": "custom", "modes": ["default", "strict"],
+     "steps": ["SDK kv set conf:dur4 = 'durable'; SDK incr conf:dur4n three times (acked).", "kill9; restart.", "SDK get conf:dur4; RESP GET conf:dur4n."],
+     "expected": "'durable' and '3'."},
+    {"id": "DUR-005", "purpose": "Connection loss is reported, not hung or silently retried, and a new connection works after restart.", "kind": "custom", "modes": ["default"],
+     "steps": ["Open connection A; SELECT 1.", "kill9 (do not close A).", "On A run SELECT 1: expect an error within 10 s whose SQLSTATE is class 08 (connection exception).", "restart; open B; SELECT 1. If the SDK has a pool/reconnect facility, a fresh borrow also works."],
+     "expected": "A errors with 08xxx promptly; B returns 1."}
+  ]
+}
