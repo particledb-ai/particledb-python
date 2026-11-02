@@ -9,13 +9,20 @@ class PipelineDefinition(unittest.TestCase):
     def test_pipeline_ddl_and_invalid_identifiers(self):
         with particledb.ParticleDB(host="127.0.0.1", pdb_port=int(os.environ["PDB_NATIVE_PORT"]), transport="pdb_wire") as db:
             name = f"python_pipeline_{os.getpid()}"
-            db.rag.create_pipeline(name, table="documents", vector_col="embedding", text_col="content")
-            db.execute(f"DROP RAG PIPELINE {name}")
-            for kwargs in ({"name": "bad; SELECT 1"}, {"mode": "rerank"}, {"k": 0}):
-                args = dict(name=name, table="documents", vector_col="embedding", text_col="content")
-                args.update(kwargs)
-                with self.assertRaises(ValueError):
-                    db.rag.create_pipeline(**args)
+            # The server validates the source table (1.1.19-rc.17 and later),
+            # so the test owns one.
+            table = f"python_pipeline_docs_{os.getpid()}"
+            db.execute(f"CREATE TABLE {table} (id int PRIMARY KEY, content text, embedding vector(3))")
+            try:
+                db.rag.create_pipeline(name, table=table, vector_col="embedding", text_col="content")
+                db.execute(f"DROP RAG PIPELINE {name}")
+                for kwargs in ({"name": "bad; SELECT 1"}, {"mode": "rerank"}, {"k": 0}):
+                    args = dict(name=name, table=table, vector_col="embedding", text_col="content")
+                    args.update(kwargs)
+                    with self.assertRaises(ValueError):
+                        db.rag.create_pipeline(**args)
+            finally:
+                db.execute(f"DROP TABLE {table}")
 
     def test_time_values_bind_and_decode_with_microseconds(self):
         expected = datetime.time(23, 59, 59, 123456)
