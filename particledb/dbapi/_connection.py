@@ -510,7 +510,7 @@ class _SessionClient:
 
 _BOOL_OPTS = {"autocommit", "prefer_unix_socket", "require_mux", "raise_on_silent_rollback",
               "bulk_executemany", "batch_executemany", "read_only", "deferrable", "use_pyarrow"}
-_FLOAT_OPTS = {"connect_timeout", "statement_timeout", "cancel_grace", "write_timeout"}
+_FLOAT_OPTS = {"connect_timeout", "statement_timeout", "cancel_grace", "write_timeout", "slow_call_warn"}
 _INT_OPTS = {"prepare_cache_size", "stream_buffer_limit"}
 _DBAPI_OPTS = {"autocommit", "paramstyle", "isolation_level", "read_only", "deferrable", "row_factory",
                "raise_on_silent_rollback", "bulk_executemany", "batch_executemany"}

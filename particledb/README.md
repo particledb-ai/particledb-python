@@ -40,6 +40,13 @@ an optional gRPC client, and the SQL-backed operation helpers.
 * **Timeout = cancel first.** `_timed_out` resets the stream and waits
   `cancel_grace`; an answer (57014, or the result) is the outcome and the
   connection stays; only an unanswered reset closes it (`ambiguous=True`).
+  A caller's `Pending.cancel()` / `Connection.cancel()` is bounded the same
+  way (`_cancel_bounded`: a timer closes the connection if the reset is not
+  answered within `cancel_grace`), so a stopped server cannot hold it.
+* **Slow-call warning.** `_await` waits through `_wait_warning`, which splits
+  the wait at `slow_call_warn` points (safe: the reader keeps partial frames)
+  and logs one WARNING per `SLOW_CALL_REPEAT` per call when the stream has had
+  no frame (`_Stream.last`) for that long. Ids and kind only, never SQL.
   A completed stream is never treated as unanswered. KV requests are never
   reset (the server drops a reset KV reply): a KV timeout closes the
   connection.

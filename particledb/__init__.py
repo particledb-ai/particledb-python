@@ -127,7 +127,7 @@ __all__ = [
 # avoid the builtin name in your own code.
 type = _particle_type  # noqa: A001 - deliberate SQL-vocabulary name
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 # Lazy import for gRPC client - avoids hard dependency on grpcio
 def __getattr__(name):

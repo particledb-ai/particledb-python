@@ -37,7 +37,7 @@ import types
 import typing
 from typing import Any
 
-SDK_VERSION = "0.2.1"
+SDK_VERSION = "0.2.2"
 ABI = "particles-1"
 PARTICLE_ATTR = "__pdb_particle__"
 

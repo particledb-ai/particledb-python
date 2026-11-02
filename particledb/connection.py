@@ -27,7 +27,9 @@ statement at a time this is a plain synchronous client: no thread hop.
 
 Cancel: ``Pending.cancel()`` / ``Connection.cancel()`` send ``RST_STREAM
 (CANCEL)``; the server ends the statement at its next interrupt check and
-answers 57014, and the connection stays usable. A client ``timeout=`` does the
+answers 57014, and the connection stays usable; a reset the server has not
+answered within ``cancel_grace`` closes the connection (``_cancel_bounded``),
+so a stopped server cannot hold a cancelled caller. A client ``timeout=`` does the
 same, and only a statement the server still has not answered after the grace
 period is ambiguous: the connection is then closed (never reused mid-
 statement) and :class:`~particledb.errors.QueryCanceledError` says
@@ -66,6 +68,11 @@ from .errors import (
 )
 
 log = logging.getLogger("particledb")
+_CONN_IDS = __import__("itertools").count(1)
+#: A call's slow-call warning repeats at most this often (seconds).
+SLOW_CALL_REPEAT = 60.0
+_KIND_NAMES = {P.F_QUERY: "QUERY", P.F_BATCH: "BATCH", P.F_PREPARE: "PREPARE",
+               P.F_EXECUTE: "EXECUTE", P.F_BULK: "BULK"}
 
 #: The native wire's default port. ONE constant: every default in this SDK
 #: reads it, and it equals the server's own ``--pdb-port`` default (the
@@ -193,7 +200,8 @@ _STATUS_FRAMES = (P.F_QUERY, P.F_EXECUTE, P.F_BATCH, P.F_BULK)
 
 class _Stream:
     __slots__ = ("sid", "cond", "done", "kind", "flags", "payload", "error", "notices",
-                 "chunks", "queue", "qbytes", "attached", "discard", "slot", "ftype", "ignore", "started")
+                 "chunks", "queue", "qbytes", "attached", "discard", "slot", "ftype", "ignore", "started",
+                 "last")
 
     def __init__(self, sid: int, cond: Optional[threading.Condition], ftype: int):
         self.sid = sid
@@ -216,6 +224,7 @@ class _Stream:
         self.slot = False
         self.ignore = False
         self.started = time.monotonic()
+        self.last = 0.0  # monotonic time of the latest frame received; 0 = none
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -332,7 +341,7 @@ class Pending:
     def cancel(self) -> bool:
         """Ask the server to cancel this statement. False when there is nothing
         to cancel (already answered, not a statement, connection closed)."""
-        return self._conn._reset(self._s)
+        return self._conn._cancel_bounded(self._s)
 
     def result(self, timeout: Optional[float] = None) -> Any:
         if not self._done:
@@ -568,6 +577,7 @@ class Connection:
         statement_timeout: Optional[float] = None,
         write_timeout: Optional[float] = 30.0,
         cancel_grace: float = DEFAULT_CANCEL_GRACE,
+        slow_call_warn: Optional[float] = 60.0,
         prefer_unix_socket: bool = True,
         unix_socket_dir: str = DEFAULT_UNIX_SOCKET_DIR,
         unix_socket_path: Optional[str] = None,
@@ -589,6 +599,18 @@ class Connection:
                 raise ValueError("write_timeout must be positive and finite, or None")
         self.write_timeout = write_timeout
         self.cancel_grace = cancel_grace
+        if slow_call_warn is not None:
+            import math
+            if not math.isfinite(slow_call_warn) or slow_call_warn < 0:
+                raise ValueError("slow_call_warn must be >= 0 and finite, or None")
+        #: Seconds a call may wait with no response before one WARNING is logged
+        #: (``particledb`` logger); 0 / None disables. The alert for
+        #: ``statement_timeout=None``, which waits without limit.
+        self.slow_call_warn = slow_call_warn or 0.0
+        #: Slow-call warnings this connection logged.
+        self.slow_call_warnings = 0
+        #: This connection's id in diagnostics.
+        self.connection_id = f"pdb-py-{next(_CONN_IDS)}"
         self.notice_handler = notice_handler
         self.stream_buffer_limit = stream_buffer_limit
         self._use_pyarrow = (_arrow.USE_PYARROW if use_pyarrow is None else bool(use_pyarrow)) \
@@ -943,12 +965,36 @@ class Connection:
         except PdbError:
             return False
 
+    def _cancel_bounded(self, s: _Stream) -> bool:
+        """A caller's cancel: reset ``s`` and, if the server has not answered it
+        within ``cancel_grace``, close the connection with the ambiguous 57014.
+        Without the bound, a caller waiting with no timeout on a server that
+        stopped (SIGSTOP, partition) stayed blocked on the socket after cancel.
+        (A timeout's own reset, ``_timed_out``, bounds its grace itself.)"""
+        if not self._reset(s):
+            return False
+        grace = self.cancel_grace
+
+        def watchdog() -> None:
+            if s.done or self._closed:
+                return
+            self._fail_all(QueryCanceledError(
+                f"statement did not answer its cancel within {grace}s; "
+                "outcome unknown, connection closed", 0, "57014", ambiguous=True))
+
+        t = threading.Timer(grace, watchdog)
+        t.daemon = True
+        t.start()
+        return True
+
     def cancel(self) -> int:
         """Cancel every statement in flight on this connection (each answers
-        57014 if it was still running). Returns how many were reset."""
+        57014 if it was still running). Returns how many were reset. A statement
+        whose reset is not answered within ``cancel_grace`` closes the
+        connection (its outcome is unknown)."""
         with self._mu:
             live = [s for s in self._streams.values() if not s.done and s.ftype in _CANCELLABLE]
-        return sum(1 for s in live if self._reset(s))
+        return sum(1 for s in live if self._cancel_bounded(s))
 
     # ── reading: the read role ───────────────────────────────────────────
 
@@ -1022,9 +1068,44 @@ class Connection:
             timeout = self.statement_timeout
         deadline = None if timeout is None else time.monotonic() + timeout
         try:
-            self._wait(s, lambda: s.done, deadline)
+            self._wait_warning(s, deadline)
         except _Timeout:
             self._timed_out(s, timeout)
+
+    def _wait_warning(self, s: _Stream, deadline: Optional[float]) -> None:
+        """``_wait`` for ``s`` to end, logging a WARNING whenever it has had no
+        response for ``slow_call_warn`` seconds (at most once per
+        ``SLOW_CALL_REPEAT`` per call). The wait is split at warning points,
+        which is safe: the reader keeps a partial frame buffered. Names the
+        connection, stream, request kind and elapsed time, never SQL or values.
+        Raises :class:`_Timeout` only at ``deadline``."""
+        warn = self.slow_call_warn
+        if not warn:
+            self._wait(s, lambda: s.done, deadline)
+            return
+        start = time.monotonic()
+        next_warn = start + warn
+        while True:
+            until = next_warn if deadline is None else min(deadline, next_warn)
+            try:
+                self._wait(s, lambda: s.done, until)
+                return
+            except _Timeout:
+                now = time.monotonic()
+                if deadline is not None and now >= deadline:
+                    raise
+                quiet_since = max(start, s.last)
+                if now - quiet_since >= warn:
+                    self.slow_call_warnings += 1
+                    log.warning(
+                        "ParticleDB slow call: connection %s stream %d %s waited %d ms, no response "
+                        "for %d ms (statement_timeout %s; set it to bound the call, slow_call_warn=0 "
+                        "to silence)", self.connection_id, s.sid, _KIND_NAMES.get(s.ftype, hex(s.ftype)),
+                        int((now - start) * 1000), int((now - quiet_since) * 1000),
+                        "none" if self.statement_timeout is None else f"{self.statement_timeout}s")
+                    next_warn = now + max(SLOW_CALL_REPEAT, warn)
+                else:
+                    next_warn = quiet_since + warn
 
     def _timed_out(self, s: _Stream, timeout: Optional[float]) -> None:
         if s.done:
@@ -1055,6 +1136,7 @@ class Connection:
             s = self._streams.get(sid)
             if s is None:
                 return  # a stream we gave up on, or unknown: dropped per spec
+            s.last = time.monotonic()
             if t == P.F_NOTICE:
                 ns = P.decode_notices(payload)
                 if ns:  # a malformed notice frame is dropped whole

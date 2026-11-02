@@ -52,6 +52,8 @@ with particledb.connect() as db:
 | `connect_timeout` | `10.0` | Seconds to connect and handshake |
 | `statement_timeout` | `None` | Seconds to wait for a response before cancelling on the server |
 | `write_timeout` | `30.0` | Seconds for socket writes. `None` waits forever |
+| `cancel_grace` | `5.0` | Seconds a cancelled call may take to answer its reset before the connection closes |
+| `slow_call_warn` | `60.0` | Seconds without a response before one WARNING is logged. `0` disables |
 | `prefer_unix_socket` | `True` | Use the Unix socket for a local host |
 | `unix_socket_dir` | `/tmp` | Server socket directory |
 | `unix_socket_path` | `None` | Explicit socket path. Never falls back to TCP |
@@ -71,6 +73,8 @@ db = particledb.connect(
     sslrootcert="ca.pem",
 )
 ```
+
+`statement_timeout` defaults to `None`, so a call against a server that stopped answering waits until cancelled. After `slow_call_warn` seconds with no response the `particledb` logger writes one WARNING with the connection id, stream id, request kind and elapsed time (never SQL or values), at most once a minute per call; `Connection.slow_call_warnings` counts them. `Pending.cancel()` and `Connection.cancel()` end such a call within `cancel_grace` and close the connection, because the outcome is unknown.
 
 A malformed connection URL raises `ValueError`. The message omits the URL.
 
